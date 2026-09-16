@@ -1,0 +1,84 @@
+name: Build WhisperBoard IPA
+
+on:
+  workflow_dispatch:          # 手动触发：仓库页面点 "Run workflow"
+  push:
+    branches: [ main ]
+
+jobs:
+  build-ipa:
+    runs-on: macos-15          # 云 Mac，macOS 15（Sonoma）
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.2.app || echo "用系统默认Xcode"
+          xcodebuild -version
+
+      - name: Install mise
+        run: |
+          curl https://mise.jdx.dev/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Tuist (via mise)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          mise install tuist swiftlint swiftformat
+
+      - name: Generate secrets (gyb)
+        run: |
+          chmod +x ./ci_scripts/secrets.sh
+          ./ci_scripts/secrets.sh || echo "secrets 生成可跳过，用占位值"
+          # 可选：如果你想填真实值，把下面改成你的环境变量
+          # cat > .env <<'EOF'
+          # BACKEND_URL=
+          # API_KEY=
+          # EOF
+
+      - name: Tuist install & generate project
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          mise x tuist -- tuist install
+          mise x tuist -- tuist generate --no-open
+
+      - name: Build .app (no code signing)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          xcodebuild \
+            -workspace WhisperBoard.xcworkspace \
+            -scheme WhisperBoard \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ./DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ENABLE_BITCODE=NO \
+            build
+
+      - name: Create .ipa bundle (unsigned / adhoc)
+        run: |
+          APP_PATH=$(find ./DerivedData/Build/Products -name "*.app" -type d | head -1)
+          echo "找到 App: $APP_PATH"
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          # 生成 adhoc 签名（无签名证书也可导出 ipa，越狱/签名工具可安装）
+          zip -r WhisperBoard.ipa Payload/
+          rm -rf Payload
+          ls -lh WhisperBoard.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WhisperBoard-ipa
+          path: WhisperBoard.ipa
+
+      # 如果要正式签名（需要你的开发者证书），把上面的 build/打包换成下面这套：
+      # 1) 在仓库 Settings -> Secrets 加:
+      #    APPLE_ID / APPLE_ID_PASSWORD / APPLE_TEAM_ID (或 P12 + MOBILEPROVISION)
+      # 2) 用 xcodebuild -exportArchive -exportOptionsPlist 导出
